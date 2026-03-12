@@ -1,0 +1,341 @@
+# Коммутация (Switching) — Подробное руководство
+
+
+## Что такое коммутация
+
+Коммутация — это передача данных внутри одной локальной сети на втором уровне модели OSI (канальный уровень).
+Коммутатор (switch) получает кадр (frame), смотрит на MAC-адрес назначения и отправляет его только в нужный порт, а не во все порты. 
+Это базовый «кирпичик» любой сети — без коммутаторов компьютеры в офисе просто не смогут общаться.
+
+## VLAN (Virtual LAN)
+
+### Простыми словами
+
+VLAN — это способ разделить один физический коммутатор на несколько «виртуальных» сетей.
+Компьютеры в одном VLAN видят друг друга, но не видят устройства в другом VLAN, даже если они подключены к одному и тому же коммутатору.
+Это как перегородки в офисе — все в одном здании, но каждый отдел в своей комнате.
+
+### Где применяется
+
+- Любой офис: отделить бухгалтерию от разработчиков, гостевой Wi-Fi от корпоративного
+- Дата-центры: изоляция серверных сегментов
+- Провайдеры: разделение трафика клиентов
+- Производство: отделение IoT/OT-устройств от корпоративной сети
+
+### На каком оборудовании
+
+- L2-коммутаторы: Catalyst 9200, 2960-X/L, 3560
+- L3-коммутаторы: Catalyst 9300/9500 (маршрутизация между VLAN)
+- ЦОД: Nexus 3000/5000/7000/9000
+
+### Основные команды CLI
+
+!  Создание VLAN 
+
+vlan 10
+ name ACCOUNTING
+vlan 20
+ name DEVELOPERS
+vlan 30
+ name MANAGEMENT
+vlan 99
+ name NATIVE_VLAN
+vlan 100
+ name GUEST_WIFI
+
+! Назначение порта в VLAN (Access) 
+
+interface GigabitEthernet0/1
+ description PC_Buhgalteriya
+ switchport mode access
+ switchport access vlan 10
+ switchport nonegotiate
+ spanning-tree portfast
+
+! Транковый порт (Trunk) 
+
+! Trunk — порт, который передаёт трафик нескольких VLAN между коммутаторами
+interface GigabitEthernet0/24
+ description TRUNK_TO_SW2
+ switchport trunk encapsulation dot1q
+ switchport mode trunk
+ switchport trunk native vlan 99
+ switchport trunk allowed vlan 10,20,30,99
+ switchport nonegotiate
+
+!  Маршрутизация между VLAN (Router-on-a-Stick) 
+
+! На маршрутизаторе — субинтерфейсы
+interface GigabitEthernet0/0.10
+ encapsulation dot1Q 10
+ ip address 192.168.10.1 255.255.255.0
+
+interface GigabitEthernet0/0.20
+ encapsulation dot1Q 20
+ ip address 192.168.20.1 255.255.255.0
+
+!  Маршрутизация между VLAN (SVI на L3-коммутаторе) 
+
+! Более производительный вариант — прямо на коммутаторе
+ip routing
+
+interface Vlan10
+ ip address 192.168.10.1 255.255.255.0
+ no shutdown
+
+interface Vlan20
+ ip address 192.168.20.1 255.255.255.0
+ no shutdown
+
+!  Безопасность портов 
+
+interface GigabitEthernet0/1
+ switchport port-security
+ switchport port-security maximum 2
+ switchport port-security violation restrict
+ switchport port-security mac-address sticky
+
+!  Диагностика 
+
+show vlan brief                     ! Все VLAN и их порты
+show interfaces trunk               ! Транковые порты
+show interfaces GigabitEthernet0/1 switchport  ! Детали порта
+show mac address-table              ! Таблица MAC-адресов
+show mac address-table vlan 10      ! MAC-адреса в конкретном VLAN
+
+
+### Python-скрипт: массовое создание VLAN на нескольких коммутаторах
+
+   python
+from netmiko import ConnectHandler
+
+switches = [
+    {"device_type": "cisco_ios", "host": "192.168.1.10",
+     "username": "admin", "password": "cisco123"},
+    {"device_type": "cisco_ios", "host": "192.168.1.11",
+     "username": "admin", "password": "cisco123"},
+    {"device_type": "cisco_ios", "host": "192.168.1.12",
+     "username": "admin", "password": "cisco123"},
+]
+
+vlans = [
+    {"id": "10", "name": "ACCOUNTING"},
+    {"id": "20", "name": "DEVELOPERS"},
+    {"id": "30", "name": "MANAGEMENT"},
+    {"id": "99", "name": "NATIVE_VLAN"},
+    {"id": "100", "name": "GUEST_WIFI"},
+]
+
+for switch in switches:
+    try:
+        conn = ConnectHandler(**switch)
+        hostname = conn.find_prompt().replace("#", "")
+        print(f"\n[{hostname}] Подключено к {switch['host']}")
+
+        for vlan in vlans:
+            commands = [
+                f"vlan {vlan['id']}",
+                f" name {vlan['name']}",
+            ]
+            conn.send_config_set(commands)
+            print(f"   VLAN {vlan['id']} ({vlan['name']}) создан")
+
+        conn.save_config()
+        print(f"   Конфигурация сохранена")
+        conn.disconnect()
+
+    except Exception as e:
+        print(f"   Ошибка: {switch['host']} — {e}")
+```
+
+---
+
+## STP (Spanning Tree Protocol)
+
+### Простыми словами
+
+Когда между коммутаторами есть несколько путей (для отказоустойчивости), может возникнуть петля — пакеты будут бесконечно ходить по кругу, забивая всю сеть. STP решает эту проблему: он автоматически блокирует лишние пути, оставляя только один активный маршрут. Если основной путь падает, STP разблокирует запасной.
+
+### Где применяется
+
+- Любая сеть с избыточными (резервными) линками между коммутаторами
+- Кампусные сети с кольцевой топологией
+- ЦОД (хотя там всё чаще используют VXLAN/EVPN без STP)
+
+### Версии STP
+
+| Протокол | Стандарт | Сходимость   | Особенность |
+| STP      | 802.1D   | ~50 секунд   | Классический, медленный |
+| RSTP     | 802.1w   | ~1-2 секунды | Быстрая сходимость |
+| PVST+    | Cisco    | ~50 секунд   | Отдельное дерево на каждый VLAN |
+| Rapid PVST+ | Cisco | ~1-2 секунды | RSTP + per-VLAN |
+| MST      | 802.1s   | ~1-2 секунды | Группы VLAN → одно дерево |
+
+### Основные команды CLI
+
+! Выбор версии STP 
+
+spanning-tree mode rapid-pvst        ! Рекомендуется для большинства сетей
+
+! Настройка Root Bridge
+
+! Сделать этот коммутатор Root для VLAN 10
+spanning-tree vlan 10 root primary
+! Или задать приоритет вручную (кратно 4096, чем меньше — тем лучше)
+spanning-tree vlan 10 priority 4096
+
+! Резервный Root
+spanning-tree vlan 10 root secondary
+
+!  Защитные механизмы 
+
+! PortFast — мгновенный переход в Forwarding (только для конечных устройств!)
+interface GigabitEthernet0/1
+ spanning-tree portfast
+
+! Глобально для всех Access-портов
+spanning-tree portfast default
+
+! BPDU Guard — выключить порт, если получен BPDU
+interface GigabitEthernet0/1
+ spanning-tree bpduguard enable
+
+! Глобально на всех PortFast-портах
+spanning-tree portfast bpduguard default
+
+! Root Guard — не позволять порту стать Root-портом
+interface GigabitEthernet0/24
+ spanning-tree guard root
+
+! Loop Guard — защита от однонаправленных сбоев
+interface GigabitEthernet0/24
+ spanning-tree guard loop
+
+! Диагностика 
+
+show spanning-tree                  ! Общая информация STP
+show spanning-tree vlan 10          ! STP для конкретного VLAN
+show spanning-tree summary          ! Сводка
+show spanning-tree interface Gi0/1  ! Состояние порта
+show spanning-tree root             ! Кто Root для каждого VLAN
+
+
+
+
+## EtherChannel
+
+### Простыми словами
+
+EtherChannel объединяет несколько физических кабелей между двумя коммутаторами в один логический канал.
+Если у вас два гигабитных линка в EtherChannel — вы получаете логический канал на 2 Гбит/с.
+Если один кабель обрывается — второй продолжает работать без потери связи. STP видит EtherChannel как один линк и не блокирует его.
+
+### Где применяется
+
+- Апликинки между коммутаторами уровня доступа и распределения
+- Подключение серверов с несколькими сетевыми картами
+- Связь между коммутаторами ЦОД
+
+### Протоколы согласования
+
+| Протокол | Тип           | Режимы |
+
+| LACP     | IEEE 802.3ad  | active / passive |
+| PAgP     | Cisco         | desirable / auto |
+| Static   | — | on / on |
+
+### Основные команды CLI
+
+```
+! EtherChannel с LACP (рекомендуется) 
+
+! На обоих коммутаторах:
+interface range GigabitEthernet0/1 - 2
+ channel-group 1 mode active           ! active = инициирует LACP
+ ! На другой стороне: mode active или mode passive
+
+! Настройка логического интерфейса
+interface Port-channel1
+ description ETHERCHANNEL_TO_SW2
+ switchport trunk encapsulation dot1q
+ switchport mode trunk
+ switchport trunk allowed vlan 10,20,30
+
+! EtherChannel с PAgP 
+
+interface range GigabitEthernet0/3 - 4
+ channel-group 2 mode desirable
+
+! L3 EtherChannel
+
+interface range GigabitEthernet0/1 - 2
+ no switchport
+ channel-group 1 mode active
+
+interface Port-channel1
+ ip address 10.0.0.1 255.255.255.252
+ no shutdown
+
+! Балансировка нагрузки 
+
+! Метод балансировки (какой хеш использовать)
+port-channel load-balance src-dst-ip    ! По IP источника и назначения
+
+! Другие варианты:
+! src-mac, dst-mac, src-dst-mac
+! src-ip, dst-ip, src-dst-ip
+! src-port, dst-port, src-dst-port
+
+! Диагностика 
+
+show etherchannel summary               ! Краткая сводка
+show etherchannel port-channel           ! Детали Port-channel
+show etherchannel load-balance           ! Метод балансировки
+show lacp neighbor                       ! LACP-соседи
+show lacp internal                       ! Внутреннее состояние LACP
+show pagp neighbor                       ! PAgP-соседи
+
+
+### Ansible Playbook: настройка EtherChannel на паре коммутаторов
+
+   yaml
+
+# etherchannel_deploy.yml
+- name: Configure EtherChannel LACP
+  hosts: switch_pair
+  gather_facts: no
+  connection: network_cli
+
+  tasks:
+    - name: Configure member interfaces
+      cisco.ios.ios_config:
+        lines:
+          - channel-group 1 mode active
+        parents: "interface range {{ etherchannel_members }}"
+
+    - name: Configure Port-channel interface
+      cisco.ios.ios_config:
+        lines:
+          - description {{ etherchannel_description }}
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk allowed vlan {{ allowed_vlans }}
+        parents: interface Port-channel1
+
+    - name: Set load-balance method
+      cisco.ios.ios_config:
+        lines:
+          - port-channel load-balance src-dst-ip
+
+    - name: Verify EtherChannel
+      cisco.ios.ios_command:
+        commands:
+          - show etherchannel summary
+      register: ec_result
+
+    - name: Show result
+      debug:
+        msg: "{{ ec_result.stdout_lines }}"
+
+
+

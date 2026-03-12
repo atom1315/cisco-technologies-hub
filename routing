@@ -390,6 +390,4 @@ conn.disconnect()
         msg: "{{ bgp_output.stdout_lines }}"
 ```
 
----
 
-[← Вернуться к README](README.md) | [Далее: Коммутация →](02-switching.md)

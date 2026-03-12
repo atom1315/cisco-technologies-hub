@@ -94,11 +94,11 @@ show ip ospf database                  ! База данных LSDB
 show ip route ospf                     ! OSPF-маршруты в таблице
 show ip ospf interface GigabitEthernet0/0  ! Детали интерфейса
 debug ip ospf adj                      ! Отладка соседства (осторожно!)
-```
+
 
 ### Python-скрипт: сбор OSPF-соседей со всех устройств
 
-```python
+   python
 from netmiko import ConnectHandler
 
 devices = [
@@ -139,9 +139,9 @@ for device in devices:
         conn.disconnect()
     except Exception as e:
         print(f"Ошибка подключения к {device['host']}: {e}")
-```
 
----
+
+
 
 ## EIGRP (Enhanced Interior Gateway Routing Protocol)
 
@@ -164,7 +164,7 @@ EIGRP — проприетарный протокол Cisco (хотя в пос�
 
 ### Основные команды CLI
 
-```
+
 ! === Базовая настройка EIGRP (classic mode) ===
 
 router eigrp 100
@@ -219,9 +219,9 @@ show ip eigrp topology              ! Таблица топологии
 show ip route eigrp                 ! EIGRP-маршруты
 show ip eigrp interfaces            ! EIGRP на интерфейсах
 show ip eigrp traffic               ! Статистика пакетов
-```
 
----
+
+
 
 ## BGP (Border Gateway Protocol)
 
@@ -246,7 +246,7 @@ BGP — «протокол Интернета». Если OSPF и EIGRP рабо
 
 ### Основные команды CLI
 
-```
+
 ! === Базовая настройка eBGP ===
 
 router bgp 65001
@@ -297,11 +297,11 @@ show ip bgp neighbors 203.0.113.1  ! Детали соседа
 show ip bgp neighbors 203.0.113.1 advertised-routes  ! Что мы отправляем
 show ip bgp neighbors 203.0.113.1 received-routes    ! Что мы получаем
 clear ip bgp * soft                ! Мягкий сброс всех сессий
-```
+
 
 ### Python-скрипт: мониторинг BGP-сессий
 
-```python
+   python
 from netmiko import ConnectHandler
 import re
 
@@ -338,12 +338,12 @@ else:
     print(output)
 
 conn.disconnect()
-```
+
 
 ### Ansible Playbook: настройка BGP на нескольких устройствах
 
-```yaml
----
+   yaml
+
 # bgp_deploy.yml — раскатка BGP-конфигурации
 - name: Deploy BGP configuration
   hosts: border_routers
@@ -388,6 +388,6 @@ conn.disconnect()
     - name: Display BGP status
       debug:
         msg: "{{ bgp_output.stdout_lines }}"
-```
+
 
 

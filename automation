@@ -1,0 +1,585 @@
+# Автоматизация и программируемость — Подробное руководство
+
+## Зачем автоматизировать сеть
+
+Ручная настройка 5 устройств — это нормально. Ручная настройка 500 — это ад. 
+Человек делает ошибки, забывает сохранить конфигурацию, путает интерфейсы. Автоматизация решает эти проблемы: конфигурация описывается как код, тестируется, 
+хранится в Git и применяется одинаково на все устройства. Если что-то пошло не так — откат к предыдущей версии за секунды.
+
+
+
+## NETCONF и RESTCONF
+
+### Простыми словами
+
+NETCONF и RESTCONF — это протоколы для программного управления устройствами. Вместо того чтобы подключаться по SSH и вводить команды как человек, 
+ваш скрипт отправляет структурированные запросы (XML или JSON) и получает структурированные ответы. Это надёжнее, чем парсить текстовый вывод CLI.
+
+- **NETCONF** — работает по SSH (порт 830), использует XML и YANG-модели. Поддерживает транзакции: либо все изменения применяются, либо ничего.
+- **RESTCONF** — HTTP-версия NETCONF. Работает через REST API (GET, POST, PUT, DELETE) с JSON/XML. 
+Проще в использовании, отлично подходит для интеграции с веб-приложениями.
+
+### На каком оборудовании
+
+- IOS XE: Catalyst 9000, ISR 4000, ASR 1000, CSR 1000v
+- NX-OS: Nexus 9000 серия
+- IOS XR: ASR 9000, NCS серия
+
+### Включение NETCONF и RESTCONF на IOS XE
+
+
+! Включить NETCONF 
+
+netconf-yang
+netconf-yang feature candidate-datastore
+
+! Включить RESTCONF 
+
+restconf
+ip http server
+ip http secure-server
+ip http authentication local
+
+! Проверка
+
+show netconf-yang sessions           ! Активные NETCONF-сессии
+show platform software yang-management process  ! Статус процессов
+
+### Python: работа с NETCONF через ncclient
+
+   python
+from ncclient import manager
+import xmltodict
+
+# Подключение к устройству
+device = manager.connect(
+    host="192.168.1.1",
+    port=830,
+    username="admin",
+    password="cisco123",
+    hostkey_verify=False,
+    device_params={"name": "iosxe"},
+)
+
+# Получить текущие интерфейсы 
+
+filter_interfaces = """
+<filter>
+  <interfaces xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces"/>
+</filter>
+"""
+
+result = device.get(filter_interfaces)
+data = xmltodict.parse(result.xml)
+
+interfaces = data["rpc-reply"]["data"]["interfaces"]["interface"]
+if not isinstance(interfaces, list):
+    interfaces = [interfaces]
+
+print("=== Интерфейсы ===\n")
+for intf in interfaces:
+    name = intf["name"]
+    enabled = intf.get("enabled", "N/A")
+    print(f"  {name}: enabled={enabled}")
+
+# Изменить описание интерфейса 
+
+config_xml = """
+<config>
+  <interfaces xmlns="urn:ietf:params:xml:ns:yang:ietf-interfaces">
+    <interface>
+      <name>GigabitEthernet2</name>
+      <description>Configured via NETCONF</description>
+    </interface>
+  </interfaces>
+</config>
+"""
+
+result = device.edit_config(target="running", config=config_xml)
+print(f"\nEdit result: {result.ok}")
+
+# Сохранить конфигурацию 
+
+save_rpc = """
+<save-config xmlns="http://cisco.com/yang/cisco-ia"/>
+"""
+device.dispatch(xmltodict.parse(save_rpc))
+
+device.close_session()
+
+
+### Python: работа с RESTCONF через requests
+
+   python
+import requests
+import json
+
+host = "192.168.1.1"
+base_url = f"https://{host}/restconf"
+headers = {
+    "Accept": "application/yang-data+json",
+    "Content-Type": "application/yang-data+json",
+}
+auth = ("admin", "cisco123")
+
+# GET: получить все интерфейсы 
+
+url = f"{base_url}/data/ietf-interfaces:interfaces"
+response = requests.get(url, headers=headers, auth=auth, verify=False)
+
+interfaces = response.json()["ietf-interfaces:interfaces"]["interface"]
+print("=== Интерфейсы (RESTCONF) ===\n")
+for intf in interfaces:
+    print(f"  {intf['name']}: {intf.get('description', 'no description')}")
+    if "ietf-ip:ipv4" in intf:
+        for addr in intf["ietf-ip:ipv4"].get("address", []):
+            print(f"    IP: {addr['ip']}/{addr['netmask']}")
+
+# PUT: настроить Loopback 
+
+loopback_url = f"{base_url}/data/ietf-interfaces:interfaces/interface=Loopback100"
+loopback_data = {
+    "ietf-interfaces:interface": {
+        "name": "Loopback100",
+        "description": "Created via RESTCONF",
+        "type": "iana-if-type:softwareLoopback",
+        "enabled": True,
+        "ietf-ip:ipv4": {
+            "address": [{"ip": "10.100.100.1", "netmask": "255.255.255.255"}]
+        },
+    }
+}
+
+response = requests.put(
+    loopback_url,
+    headers=headers,
+    auth=auth,
+    data=json.dumps(loopback_data),
+    verify=False,
+)
+print(f"\nLoopback100 создан: {response.status_code}")
+
+# DELETE: удалить Loopback 
+
+# response = requests.delete(loopback_url, headers=headers, auth=auth, verify=False)
+
+
+
+
+## Ansible для Cisco
+
+### Простыми словами
+
+Ansible — инструмент автоматизации, который не требует установки агентов на устройства.
+Вы описываете желаемое состояние в YAML-файлах (плейбуках), и Ansible подключается к устройствам по SSH и приводит их к этому состоянию. 
+Если конфигурация уже соответствует — ничего не происходит (идемпотентность).
+
+### Структура проекта
+
+```
+cisco-ansible/
+├── ansible.cfg              # Настройки Ansible
+├── inventory/
+│   ├── hosts.yml            # Список устройств
+│   └── group_vars/
+│       ├── all.yml          # Общие переменные
+│       ├── routers.yml      # Переменные маршрутизаторов
+│       └── switches.yml     # Переменные коммутаторов
+├── playbooks/
+│   ├── backup.yml           # Бэкап конфигураций
+│   ├── deploy_vlans.yml     # Раскатка VLAN
+│   ├── deploy_ospf.yml      # Раскатка OSPF
+│   └── compliance_check.yml # Проверка соответствия
+├── templates/
+│   ├── ospf.j2              # Jinja2-шаблон для OSPF
+│   ├── vlans.j2             # Шаблон VLAN
+│   └── acl.j2               # Шаблон ACL
+└── roles/
+    ├── base_config/         # Базовая настройка
+    ├── routing/             # Маршрутизация
+    └── security/            # Безопасность
+
+
+### Inventory (hosts.yml)
+
+   yaml
+
+all:
+  children:
+    routers:
+      hosts:
+        R1:
+          ansible_host: 192.168.1.1
+          router_id: 1.1.1.1
+        R2:
+          ansible_host: 192.168.1.2
+          router_id: 2.2.2.2
+
+    switches:
+      hosts:
+        SW1:
+          ansible_host: 192.168.1.10
+        SW2:
+          ansible_host: 192.168.1.11
+        SW3:
+          ansible_host: 192.168.1.12
+
+  vars:
+    ansible_network_os: cisco.ios.ios
+    ansible_connection: network_cli
+    ansible_user: admin
+    ansible_password: cisco123
+    ansible_become: yes
+    ansible_become_method: enable
+    ansible_become_password: enable123
+
+
+### Playbook: бэкап всех устройств
+
+   yaml
+
+# playbooks/backup.yml
+- name: Backup all Cisco devices
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Get current date
+      set_fact:
+        backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d_%H-%M') }}"
+      run_once: true
+
+    - name: Backup running config
+      cisco.ios.ios_config:
+        backup: yes
+        backup_options:
+          dir_path: "./backups/{{ backup_date }}"
+          filename: "{{ inventory_hostname }}.cfg"
+
+    - name: Display backup status
+      debug:
+        msg: " Backup saved: ./backups/{{ backup_date }}/{{ inventory_hostname }}.cfg"
+
+
+### Playbook: раскатка VLAN с шаблонами
+
+   yaml
+
+# playbooks/deploy_vlans.yml
+- name: Deploy VLANs to all switches
+  hosts: switches
+  gather_facts: no
+
+  vars:
+    vlans:
+      - id: 10
+        name: ACCOUNTING
+        subnet: 192.168.10.0/24
+      - id: 20
+        name: DEVELOPERS
+        subnet: 192.168.20.0/24
+      - id: 30
+        name: MANAGEMENT
+        subnet: 192.168.30.0/24
+      - id: 99
+        name: NATIVE
+      - id: 100
+        name: GUEST
+
+  tasks:
+    - name: Create VLANs
+      cisco.ios.ios_vlans:
+        config:
+          - vlan_id: "{{ item.id }}"
+            name: "{{ item.name }}"
+            state: active
+        state: merged
+      loop: "{{ vlans }}"
+
+    - name: Configure trunk ports
+      cisco.ios.ios_config:
+        lines:
+          - switchport trunk encapsulation dot1q
+          - switchport mode trunk
+          - switchport trunk native vlan 99
+          - switchport trunk allowed vlan 10,20,30,99,100
+        parents: "interface {{ item }}"
+      loop: "{{ trunk_ports | default(['GigabitEthernet0/24']) }}"
+
+    - name: Verify VLANs
+      cisco.ios.ios_command:
+        commands:
+          - show vlan brief
+      register: vlan_output
+
+    - name: Show VLANs
+      debug:
+        msg: "{{ vlan_output.stdout_lines[0] }}"
+
+
+### Jinja2-шаблон для OSPF (templates/ospf.j2)
+
+   jinja2
+router ospf {{ ospf_process_id | default(1) }}
+ router-id {{ router_id }}
+ auto-cost reference-bandwidth {{ ospf_ref_bw | default(10000) }}
+ passive-interface default
+{% for intf in ospf_active_interfaces %}
+ no passive-interface {{ intf }}
+{% endfor %}
+{% for network in ospf_networks %}
+ network {{ network.prefix }} {{ network.wildcard }} area {{ network.area }}
+{% endfor %}
+{% if ospf_default_route is defined and ospf_default_route %}
+ default-information originate
+{% endif %}
+!
+{% for intf in ospf_interface_costs | default([]) %}
+interface {{ intf.name }}
+ ip ospf cost {{ intf.cost }}
+{% endfor %}
+
+
+### Playbook: проверка соответствия (Compliance Check)
+
+   yaml
+
+# playbooks/compliance_check.yml
+- name: Network Compliance Check
+  hosts: all
+  gather_facts: no
+
+  vars:
+    required_config_lines:
+      - "service timestamps log datetime msec"
+      - "service password-encryption"
+      - "no ip http server"
+      - "ip ssh version 2"
+      - "banner motd"
+      - "ntp server"
+      - "logging buffered"
+
+  tasks:
+    - name: Get running config
+      cisco.ios.ios_command:
+        commands:
+          - show running-config
+      register: running_config
+
+    - name: Check required configurations
+      set_fact:
+        compliance_results: >-
+          {{ compliance_results | default([]) + [{
+            'check': item,
+            'status': 'PASS' if item in running_config.stdout[0] else 'FAIL'
+          }] }}
+      loop: "{{ required_config_lines }}"
+
+    - name: Display compliance report
+      debug:
+        msg: |
+          === Compliance Report: {{ inventory_hostname }} ===
+          {% for result in compliance_results %}
+          {{ '' if result.status == 'PASS' else '' }} {{ result.check }}: {{ result.status }}
+          {% endfor %}
+
+    - name: Fail if non-compliant
+      fail:
+        msg: "{{ inventory_hostname }} is NOT compliant!"
+      when: compliance_results | selectattr('status', 'equalto', 'FAIL') | list | length > 0
+      ignore_errors: yes
+
+
+
+
+## Terraform для Cisco
+
+### Простыми словами
+
+Terraform управляет инфраструктурой декларативно: вы описываете, что должно быть, а Terraform сам определяет, какие изменения нужно внести. В отличие от Ansible, Terraform хранит состояние (state file) и может точно показать, что изменилось (plan), перед применением.
+
+### Пример: управление Cisco ACI через Terraform
+
+   hcl
+# main.tf — управление Cisco ACI
+
+terraform {
+  required_providers {
+    aci = {
+      source  = "CiscoDevNet/aci"
+      version = "~> 2.0"
+    }
+  }
+}
+
+provider "aci" {
+  username = var.aci_username
+  password = var.aci_password
+  url      = var.aci_url
+  insecure = true
+}
+
+# Создать Tenant
+resource "aci_tenant" "production" {
+  name        = "PROD"
+  description = "Production tenant managed by Terraform"
+}
+
+# Создать VRF
+resource "aci_vrf" "prod_vrf" {
+  tenant_dn = aci_tenant.production.id
+  name      = "PROD_VRF"
+}
+
+# Создать Bridge Domain
+resource "aci_bridge_domain" "web_bd" {
+  tenant_dn          = aci_tenant.production.id
+  name               = "WEB_BD"
+  relation_fv_rs_ctx = aci_vrf.prod_vrf.id
+}
+
+# Создать Subnet
+resource "aci_subnet" "web_subnet" {
+  parent_dn = aci_bridge_domain.web_bd.id
+  ip        = "10.1.1.1/24"
+  scope     = ["public"]
+}
+
+# Создать Application Profile
+resource "aci_application_profile" "web_app" {
+  tenant_dn = aci_tenant.production.id
+  name      = "WEB_APP"
+}
+
+# Создать EPG
+resource "aci_application_epg" "web_epg" {
+  application_profile_dn = aci_application_profile.web_app.id
+  name                   = "WEB_EPG"
+  relation_fv_rs_bd      = aci_bridge_domain.web_bd.id
+}
+
+# Создать контракт (фильтрация трафика)
+resource "aci_contract" "web_contract" {
+  tenant_dn = aci_tenant.production.id
+  name      = "ALLOW_HTTPS"
+}
+
+resource "aci_contract_subject" "https_subject" {
+  contract_dn = aci_contract.web_contract.id
+  name        = "HTTPS"
+}
+
+# Переменные
+variable "aci_username" { default = "admin" }
+variable "aci_password" { sensitive = true }
+variable "aci_url" { default = "https://apic.example.com" }
+
+# Outputs
+output "tenant_id" {
+  value = aci_tenant.production.id
+}
+
+
+   bash
+# Рабочий процесс Terraform
+terraform init      # Установить провайдер
+terraform plan      # Показать план изменений
+terraform apply     # Применить
+terraform destroy   # Удалить всё (осторожно!)
+
+
+
+
+## pyATS — тестирование сети
+
+### Простыми словами
+
+pyATS (Python Automated Test System) — это фреймворк от Cisco для автоматического тестирования сетей. Genie — библиотека поверх pyATS, которая умеет парсить вывод CLI-команд в структурированные данные. Это как unit-тесты, только для сети: «проверь, что все OSPF-соседства в состоянии FULL», «проверь, что BGP получает нужное количество префиксов».
+
+### Пример: тестирование до и после изменений
+
+   python
+# pyats_test.py — snapshot и сравнение состояния сети
+from genie.testbed import load
+from genie.utils.diff import Diff
+
+# Загрузить testbed (список устройств)
+testbed = load("testbed.yml")
+
+device = testbed.devices["R1"]
+device.connect(log_stdout=False)
+
+# Snapshot ДО изменений 
+
+print(" Сохраняем snapshot ДО изменений...\n")
+
+ospf_before = device.learn("ospf")
+bgp_before = device.learn("bgp")
+interfaces_before = device.learn("interface")
+routes_before = device.learn("routing")
+
+#  Здесь происходят изменения в сети ...
+input("🔧 Внесите изменения в сеть и нажмите Enter...")
+
+#  Snapshot ПОСЛЕ изменений 
+
+print(" Сохраняем snapshot ПОСЛЕ изменений...\n")
+
+ospf_after = device.learn("ospf")
+bgp_after = device.learn("bgp")
+interfaces_after = device.learn("interface")
+routes_after = device.learn("routing")
+
+#  Сравнение 
+
+print("=== OSPF Diff ===")
+ospf_diff = Diff(ospf_before.info, ospf_after.info)
+ospf_diff.findDiff()
+print(ospf_diff)
+
+print("\n=== BGP Diff ===")
+bgp_diff = Diff(bgp_before.info, bgp_after.info)
+bgp_diff.findDiff()
+print(bgp_diff)
+
+print("\n=== Routes Diff ===")
+routes_diff = Diff(routes_before.info, routes_after.info)
+routes_diff.findDiff()
+print(routes_diff)
+
+device.disconnect()
+
+
+### Testbed файл (testbed.yml)
+
+   yaml
+
+testbed:
+  name: MyLab
+  credentials:
+    default:
+      username: admin
+      password: cisco123
+    enable:
+      password: enable123
+
+devices:
+  R1:
+    os: iosxe
+    type: router
+    connections:
+      default:
+        protocol: ssh
+        ip: 192.168.1.1
+
+  SW1:
+    os: iosxe
+    type: switch
+    connections:
+      default:
+        protocol: ssh
+        ip: 192.168.1.10
+
+
+
+

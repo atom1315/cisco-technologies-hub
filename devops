@@ -1,0 +1,610 @@
+# DevOps, CI/CD и мониторинг — Подробное руководство
+
+
+## NetDevOps: DevOps для сетевых инженеров
+
+NetDevOps — это перенос практик разработки ПО в мир сетевого администрирования.
+  Идея простая: сетевая конфигурация — это код. Код хранится в Git, проходит ревью, тестируется автоматически и применяется через пайплайн.
+    Никаких изменений «руками в консоли на продакшене в пятницу вечером».
+
+### Принципы NetDevOps
+
+1. **Всё в Git** — конфигурации, плейбуки, скрипты, шаблоны, документация
+2. **Ревью** — любое изменение проходит через Pull Request / Merge Request
+3. **Автотесты** — линтинг, валидация, тестирование в лабораторной среде
+4. **Автодеплой** — после одобрения и тестов конфигурация применяется автоматически
+5. **Откат** — если что-то пошло не так — revert через Git и повторный деплой
+
+
+
+## CI/CD пайплайн для сетевой инфраструктуры
+
+### Как это выглядит на практике
+
+
+┌──────────┐    ┌──────────┐    ┌───────────┐    ┌──────────┐    ┌──────────┐
+│  Инженер │───>│   Git    │───>│   CI/CD   │───>│  Тесты   │───>│  Деплой  │
+│  пишет   │    │  commit  │    │  pipeline │    │  в лабе  │    │  в прод  │
+│  код     │    │  + push  │    │  запуск   │    │  pyATS   │    │  Ansible │
+└──────────┘    └──────────┘    └───────────┘    └──────────┘    └──────────┘
+                                                       │               │
+                                                       ▼               ▼
+                                                 ┌──────────┐    ┌──────────┐
+                                                 │ Отчёт    │    │ Health   │
+                                                 │ о тестах │    │ Check    │
+                                                 └──────────┘    └──────────┘
+
+
+### GitLab CI для сетевого деплоя (.gitlab-ci.yml)
+
+   yaml
+
+# .gitlab-ci.yml — CI/CD для сетевой инфраструктуры
+
+stages:
+  - lint
+  - validate
+  - test_lab
+  - deploy_staging
+  - deploy_production
+  - post_check
+
+variables:
+  ANSIBLE_HOST_KEY_CHECKING: "False"
+  ANSIBLE_FORCE_COLOR: "true"
+
+# Этап 1: Линтинг 
+lint_yaml:
+  stage: lint
+  image: python:3.11
+  script:
+    - pip install yamllint ansible-lint
+    - yamllint -c .yamllint playbooks/ inventory/
+    - ansible-lint playbooks/*.yml
+  rules:
+    - changes:
+        - "playbooks/**"
+        - "inventory/**"
+        - "templates/**"
+
+lint_python:
+  stage: lint
+  image: python:3.11
+  script:
+    - pip install flake8 black
+    - flake8 scripts/ --max-line-length=120
+    - black --check scripts/
+  rules:
+    - changes:
+        - "scripts/**"
+
+# Этап 2: Валидация конфигураций 
+validate_configs:
+  stage: validate
+  image: python:3.11
+  script:
+    - pip install ansible cisco.ios
+    - ansible-playbook playbooks/validate.yml --check --diff
+  rules:
+    - changes:
+        - "playbooks/**"
+        - "templates/**"
+
+# Этап 3: Тестирование в лабораторной среде 
+test_in_lab:
+  stage: test_lab
+  image: python:3.11
+  script:
+    - pip install pyats genie netmiko
+    # Snapshot ДО
+    - python scripts/pyats_snapshot.py --testbed testbed_lab.yml --phase before
+    # Применить конфигурацию в лабе
+    - ansible-playbook playbooks/deploy.yml -i inventory/lab_hosts.yml
+    # Snapshot ПОСЛЕ
+    - python scripts/pyats_snapshot.py --testbed testbed_lab.yml --phase after
+    # Сравнить и проверить
+    - python scripts/pyats_compare.py --before snapshots/before --after snapshots/after
+  artifacts:
+    paths:
+      - snapshots/
+      - reports/
+    when: always
+  rules:
+    - if: '$CI_MERGE_REQUEST_ID'
+
+# Этап 4: Деплой на staging 
+deploy_staging:
+  stage: deploy_staging
+  image: python:3.11
+  script:
+    - pip install ansible cisco.ios
+    - ansible-playbook playbooks/deploy.yml -i inventory/staging_hosts.yml
+    - python scripts/health_check.py --env staging
+  environment:
+    name: staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  when: manual
+
+# Этап 5: Деплой в production 
+deploy_production:
+  stage: deploy_production
+  image: python:3.11
+  script:
+    - pip install ansible cisco.ios
+    # Бэкап перед деплоем
+    - ansible-playbook playbooks/backup.yml -i inventory/prod_hosts.yml
+    # Деплой
+    - ansible-playbook playbooks/deploy.yml -i inventory/prod_hosts.yml
+  environment:
+    name: production
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  when: manual
+  needs:
+    - deploy_staging
+
+# Этап 6: Проверка после деплоя 
+post_deploy_check:
+  stage: post_check
+  image: python:3.11
+  script:
+    - pip install pyats genie
+    - python scripts/health_check.py --env production
+    - python scripts/pyats_health.py --testbed testbed_prod.yml
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  needs:
+    - deploy_production
+
+
+### GitHub Actions вариант
+
+   yaml
+# .github/workflows/network-deploy.yml
+name: Network CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install yamllint ansible-lint
+      - run: yamllint playbooks/ inventory/
+      - run: ansible-lint playbooks/*.yml
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pyats genie ansible netmiko
+      - run: ansible-playbook playbooks/deploy.yml -i inventory/lab_hosts.yml
+      - run: python scripts/health_check.py --env lab
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ansible cisco.ios
+      - run: ansible-playbook playbooks/backup.yml -i inventory/prod_hosts.yml
+      - run: ansible-playbook playbooks/deploy.yml -i inventory/prod_hosts.yml
+      - run: python scripts/health_check.py --env production
+
+
+
+
+## Health Check скрипт
+
+   python
+#!/usr/bin/env python3
+
+health_check.py — проверка здоровья сети после деплоя
+
+
+import sys
+import argparse
+from netmiko import ConnectHandler
+
+def check_device(device_info):
+    """Проверить одно устройство"""
+    results = {"host": device_info["host"], "checks": []}
+    
+    try:
+        conn = ConnectHandler(**device_info)
+        hostname = conn.find_prompt().replace("#", "")
+        
+        # 1. Проверка OSPF-соседей
+        ospf = conn.send_command("show ip ospf neighbor", use_textfsm=True)
+        if isinstance(ospf, list):
+            full_neighbors = [n for n in ospf if "FULL" in n.get("state", "")]
+            results["checks"].append({
+                "name": "OSPF Neighbors",
+                "status": "PASS" if full_neighbors else "FAIL",
+                "detail": f"{len(full_neighbors)} neighbors in FULL state"
+            })
+        
+        # 2. Проверка BGP-сессий
+        bgp = conn.send_command("show ip bgp summary", use_textfsm=True)
+        if isinstance(bgp, list):
+            up_peers = [p for p in bgp if p.get("state_pfxrcd", "").isdigit()]
+            results["checks"].append({
+                "name": "BGP Sessions",
+                "status": "PASS" if up_peers else "WARN",
+                "detail": f"{len(up_peers)}/{len(bgp)} peers UP"
+            })
+        
+        # 3. Проверка интерфейсов
+        interfaces = conn.send_command(
+            "show ip interface brief", use_textfsm=True
+        )
+        if isinstance(interfaces, list):
+            down_intfs = [
+                i for i in interfaces
+                if i.get("status") != "up" and "Loopback" not in i.get("intf", "")
+            ]
+            results["checks"].append({
+                "name": "Interfaces",
+                "status": "PASS" if not down_intfs else "WARN",
+                "detail": f"{len(down_intfs)} interfaces down"
+            })
+        
+        # 4. Проверка CPU
+        cpu = conn.send_command("show processes cpu | include CPU")
+        if "CPU" in cpu:
+            # Извлечь процент загрузки
+            import re
+            match = re.search(r"(\d+)%.*?one minute", cpu)
+            if match:
+                cpu_pct = int(match.group(1))
+                results["checks"].append({
+                    "name": "CPU Load",
+                    "status": "PASS" if cpu_pct < 80 else "FAIL",
+                    "detail": f"{cpu_pct}% (1 min avg)"
+                })
+        
+        # 5. Проверка памяти
+        memory = conn.send_command("show platform resources")
+        results["checks"].append({
+            "name": "Memory",
+            "status": "PASS",
+            "detail": "Checked"
+        })
+        
+        conn.disconnect()
+        
+    except Exception as e:
+        results["checks"].append({
+            "name": "Connection",
+            "status": "FAIL",
+            "detail": str(e)
+        })
+    
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env", required=True, choices=["lab", "staging", "production"])
+    args = parser.parse_args()
+    
+    # Загрузить устройства для окружения
+    environments = {
+        "lab": [
+            {"device_type": "cisco_ios", "host": "10.0.0.1",
+             "username": "admin", "password": "cisco123"},
+        ],
+        "staging": [
+            {"device_type": "cisco_ios", "host": "10.1.0.1",
+             "username": "admin", "password": "cisco123"},
+        ],
+        "production": [
+            {"device_type": "cisco_ios", "host": "10.2.0.1",
+             "username": "admin", "password": "cisco123"},
+            {"device_type": "cisco_ios", "host": "10.2.0.2",
+             "username": "admin", "password": "cisco123"},
+        ],
+    }
+    
+    devices = environments[args.env]
+    all_passed = True
+    
+    print(f"\n{'='*60}")
+    print(f"  Health Check — {args.env.upper()}")
+    print(f"{'='*60}\n")
+    
+    for device_info in devices:
+        results = check_device(device_info)
+        print(f" {results['host']}")
+        
+        for check in results["checks"]:
+            icon = {"PASS", "WARN", "FAIL"}[check["status"]]
+            print(f"  {icon} {check['name']}: {check['detail']}")
+            if check["status"] == "FAIL":
+                all_passed = False
+        print()
+    
+    if not all_passed:
+        print(" Health check FAILED! Review issues above.")
+        sys.exit(1)
+    else:
+        print("All health checks PASSED!")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+## Model-Driven Telemetry
+
+### Простыми словами
+
+Традиционный мониторинг (SNMP) работает по принципу «вопрос-ответ»: система мониторинга спрашивает устройство каждые 5 минут «как дела?». Это медленно и нагружает сеть. Model-Driven Telemetry работает наоборот: устройство само отправляет данные каждые 10 секунд (или чаще) в реальном времени. Это как разница между проверкой почтового ящика раз в час и push-уведомлениями на телефоне.
+
+### Настройка на IOS XE
+
+
+! Настройка Telemetry Subscription 
+
+! Стриминг данных об интерфейсах каждые 10 секунд
+telemetry ietf subscription 101
+ encoding encode-kvgpb
+ filter xpath /interfaces-ios-xe-oper:interfaces/interface/statistics
+ source-address 10.0.0.1
+ stream yang-push
+ update-policy periodic 1000
+ receiver ip address 10.0.0.200 57000 protocol grpc-tcp
+
+! Стриминг CPU
+telemetry ietf subscription 102
+ encoding encode-kvgpb
+ filter xpath /process-cpu-ios-xe-oper:cpu-usage/cpu-utilization
+ source-address 10.0.0.1
+ stream yang-push
+ update-policy periodic 3000
+ receiver ip address 10.0.0.200 57000 protocol grpc-tcp
+
+! Стриминг BGP-соседей
+telemetry ietf subscription 103
+ encoding encode-kvgpb
+ filter xpath /bgp-ios-xe-oper:bgp-state-data/neighbors
+ source-address 10.0.0.1
+ stream yang-push
+ update-policy periodic 5000
+ receiver ip address 10.0.0.200 57000 protocol grpc-tcp
+
+! Стриминг состояния памяти
+telemetry ietf subscription 104
+ encoding encode-kvgpb
+ filter xpath /memory-ios-xe-oper:memory-statistics/memory-statistic
+ source-address 10.0.0.1
+ stream yang-push
+ update-policy periodic 3000
+ receiver ip address 10.0.0.200 57000 protocol grpc-tcp
+
+! Диагностика 
+
+show telemetry ietf subscription all      ! Все подписки
+show telemetry ietf subscription 101      ! Конкретная подписка
+show telemetry internal connection        ! Соединения с приёмниками
+
+
+### Стек мониторинга: TIG (Telegraf + InfluxDB + Grafana)
+
+   yaml
+# docker-compose.yml — стек мониторинга TIG
+version: "3.8"
+
+services:
+  telegraf:
+    image: telegraf:latest
+    container_name: telegraf
+    ports:
+      - "57000:57000"    # gRPC для Cisco Telemetry
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    depends_on:
+      - influxdb
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=influx123
+      - DOCKER_INFLUXDB_INIT_ORG=netops
+      - DOCKER_INFLUXDB_INIT_BUCKET=cisco_telemetry
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=grafana123
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - influxdb
+
+volumes:
+  influxdb_data:
+  grafana_data:
+
+
+### Конфигурация Telegraf (telegraf.conf)
+
+   toml
+# telegraf.conf — приём Cisco gRPC Telemetry
+
+[agent]
+  interval = "10s"
+  flush_interval = "10s"
+
+# Приём данных от Cisco по gRPC
+[[inputs.cisco_telemetry_mdt]]
+  transport = "grpc"
+  service_address = ":57000"
+
+# Запись в InfluxDB
+[[outputs.influxdb_v2]]
+  urls = ["http://influxdb:8086"]
+  token = "my-super-secret-token"
+  organization = "netops"
+  bucket = "cisco_telemetry"
+
+
+
+
+## NetFlow — анализ трафика
+
+### Настройка Flexible NetFlow на IOS XE
+
+
+! Определить Flow Record 
+
+flow record CUSTOM_NETFLOW
+ match ipv4 source address
+ match ipv4 destination address
+ match ipv4 protocol
+ match transport source-port
+ match transport destination-port
+ match interface input
+ collect counter bytes long
+ collect counter packets long
+ collect timestamp sys-uptime first
+ collect timestamp sys-uptime last
+
+! Определить Flow Exporter 
+
+flow exporter EXPORT_TO_COLLECTOR
+ destination 10.0.0.200
+ source Loopback0
+ transport udp 9995
+ export-protocol netflow-v9
+ template data timeout 60
+
+! Определить Flow Monitor 
+
+flow monitor TRAFFIC_MONITOR
+ record CUSTOM_NETFLOW
+ exporter EXPORT_TO_COLLECTOR
+ cache timeout active 60
+ cache timeout inactive 15
+
+! Применить на интерфейсе 
+
+interface GigabitEthernet0/0
+ ip flow monitor TRAFFIC_MONITOR input
+ ip flow monitor TRAFFIC_MONITOR output
+
+! Диагностика 
+
+show flow monitor TRAFFIC_MONITOR cache    ! Кеш потоков
+show flow exporter EXPORT_TO_COLLECTOR statistics  ! Статистика экспорта
+show flow record CUSTOM_NETFLOW            ! Определение записи
+
+
+
+
+## SNMP и Syslog
+
+### Настройка SNMPv3 (безопасная версия)
+
+
+! SNMPv3 
+
+! Создать группу с аутентификацией и шифрованием
+snmp-server group NETOPS_GROUP v3 priv
+
+! Создать пользователя
+snmp-server user netops_user NETOPS_GROUP v3 auth sha AuthP@ss123 priv aes 128 PrivP@ss123
+
+! Разрешить доступ только с сервера мониторинга
+access-list 20 permit 10.0.0.200
+
+snmp-server group NETOPS_GROUP v3 priv access 20
+
+! SNMP traps (уведомления)
+snmp-server enable traps
+snmp-server host 10.0.0.200 version 3 priv netops_user
+
+! Syslog 
+
+! Отправлять логи на сервер
+logging host 10.0.0.200 transport udp port 514
+logging trap informational
+logging source-interface Loopback0
+
+! Формат с временными метками
+service timestamps log datetime msec localtime show-timezone
+
+! Буферизация локально
+logging buffered 64000 informational
+
+! Диагностика 
+
+show snmp user                  ! SNMP-пользователи
+show snmp group                 ! SNMP-группы
+show logging                    ! Локальные логи
+show logging | include %LINK    ! Фильтр по событиям
+
+
+
+
+## Итого: полный стек NetDevOps
+
+
+┌─────────────────────────────────────────────────────────────┐
+│                    РАЗРАБОТКА И ХРАНЕНИЕ                    │
+│  Git (GitHub/GitLab) → конфигурации, плейбуки, скрипты      │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ commit + push
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       CI/CD PIPELINE                        │
+│  Lint → Validate → Test (CML/pyATS) → Deploy → Health Check │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ Ansible / RESTCONF / NETCONF
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    СЕТЕВОЕ ОБОРУДОВАНИЕ                     │
+│  IOS XE / NX-OS / ASA / WLC / Meraki                        │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ Telemetry / NetFlow / SNMP / Syslog
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       МОНИТОРИНГ                            │
+│  Telegraf → InfluxDB → Grafana   |   ELK   |  ThousandEyes  │
+└─────────────────────────────────────────────────────────────┘
+
+
+
+

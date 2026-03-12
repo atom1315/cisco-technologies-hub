@@ -1,0 +1,197 @@
+# Беспроводные сети (Wireless) — Подробное руководство
+
+
+## Как работает корпоративный Wi-Fi
+
+Домашний Wi-Fi — это одна точка доступа, которая работает сама по себе. 
+В корпоративной среде всё иначе: десятки и сотни точек доступа (AP) управляются централизованно через контроллер (WLC).
+Контроллер решает, на каком канале работать, какую мощность выставить, как аутентифицировать пользователей и как обеспечить бесшовный роуминг между точками.
+
+
+## Cisco WLC (Wireless LAN Controller)
+
+### Простыми словами
+
+WLC — это «мозг» беспроводной сети. Точки доступа (Lightweight AP) сами по себе «глупые» — они подключаются к контроллеру по протоколу CAPWAP
+и получают от него всю конфигурацию: SSID, безопасность, политики QoS, настройки каналов.
+Администратор управляет всей сетью через один интерфейс, а не настраивает каждую AP отдельно.
+
+### Где применяется
+
+- Офисы от 10 до нескольких тысяч точек доступа
+- Склады и производственные цеха
+- Гостиницы, университеты, больницы
+- Ритейл (магазины с гостевым Wi-Fi и аналитикой)
+
+### На каком оборудовании
+
+- Контроллеры: Cisco 9800-40, 9800-80, 9800-CL (виртуальный)
+- Embedded WLC: Catalyst 9800 встроенный в Catalyst 9300
+- Точки доступа: Catalyst 9100 серия (Wi-Fi 6/6E), Aironet серия
+- Cisco Meraki MR серия (облачное управление, без WLC)
+
+### Основные команды CLI (Cisco 9800 WLC, IOS XE)
+
+
+! === Базовая настройка WLAN (SSID) ===
+
+! Создать WLAN-профиль
+wlan CORP_WIFI 1 CORP_WIFI
+ security wpa wpa2
+ security wpa wpa2 ciphers aes
+ security dot1x authentication-list ISE_AUTH
+ no shutdown
+
+! Создать гостевую сеть
+wlan GUEST_WIFI 2 GUEST_WIFI
+ security wpa wpa2
+ security wpa wpa2 ciphers aes
+ security wpa psk set-key ascii 0 GuestP@ss2024
+ no shutdown
+
+! === Policy Profile (привязка VLAN) ===
+
+wireless profile policy CORP_POLICY
+ vlan 20
+ no shutdown
+
+wireless profile policy GUEST_POLICY
+ vlan 100
+ session-timeout 3600
+ idle-timeout 600
+ no shutdown
+
+! AP Join Profile 
+
+ap profile DEFAULT_AP_PROFILE
+ description Standard-AP-Settings
+ hyperlocation ble-beacon 0
+ country AT
+
+! Policy Tag (связывает WLAN + Policy) 
+
+wireless tag policy MAIN_TAG
+ wlan CORP_WIFI policy CORP_POLICY
+ wlan GUEST_WIFI policy GUEST_POLICY
+
+! Привязка тега к AP 
+
+ap ABCD.1234.5678
+ policy-tag MAIN_TAG
+
+! RF Profile (радиочастотные настройки) 
+
+ap dot11 24ghz rrm txpower-threshold -65
+ap dot11 5ghz rrm txpower-threshold -65
+ap dot11 24ghz rrm channel-list 1 6 11
+ap dot11 5ghz rrm channel-list 36 40 44 48 149 153 157 161
+
+! Диагностика 
+
+show wlan summary                        ! Все WLAN
+show ap summary                          ! Список подключённых AP
+show ap name AP-OFFICE-01 config general ! Детали конкретной AP
+show wireless client summary             ! Подключённые клиенты
+show wireless client mac-address AABB.CCDD.EEFF detail  ! Детали клиента
+show ap dot11 5ghz summary               ! Радио 5 ГГц
+show wireless tag policy summary         ! Policy Tags
+show ap auto-rf dot11 5ghz              ! Автонастройка RF
+
+
+### Python-скрипт: мониторинг беспроводных клиентов через RESTCONF
+
+   python
+import requests
+import json
+
+# Cisco 9800 WLC RESTCONF
+wlc_host = "10.0.0.100"
+url = f"https://{wlc_host}/restconf/data/Cisco-IOS-XE-wireless-client-oper:client-oper-data/common-oper-data"
+
+headers = {
+    "Accept": "application/yang-data+json",
+    "Content-Type": "application/yang-data+json",
+}
+
+response = requests.get(
+    url,
+    headers=headers,
+    auth=("admin", "cisco123"),
+    verify=False,
+)
+
+if response.status_code == 200:
+    data = response.json()
+    clients = data.get("Cisco-IOS-XE-wireless-client-oper:common-oper-data", [])
+
+    print(f"=== Wireless Clients: {len(clients)} ===\n")
+    for client in clients:
+        mac = client.get("client-mac", "N/A")
+        ssid = client.get("co-wlan-profile-name", "N/A")
+        ap_name = client.get("co-ap-name", "N/A")
+        ip = client.get("co-client-ip", "N/A")
+        print(f"  MAC: {mac}  IP: {ip}")
+        print(f"  SSID: {ssid}  AP: {ap_name}")
+        print(f"  ---")
+else:
+    print(f"Ошибка: {response.status_code}")
+
+
+
+
+## Cisco DNA Center / Catalyst Center
+
+### Простыми словами
+
+DNA Center (сейчас Catalyst Center) — это платформа «умного» управления всей сетью.
+Вместо того чтобы настраивать каждое устройство отдельно, вы описываете, ЧТО хотите (intent-based networking), а DNA Center сам генерирует и применяет конфигурации.
+Он также собирает телеметрию, анализирует проблемы и помогает находить причины сбоев.
+
+### Возможности
+
+- Автоматическое развёртывание устройств (Plug and Play)
+- Software-Defined Access (SD-Access) — микросегментация на основе групп
+- Assurance — мониторинг здоровья сети, клиентов, приложений
+- AI/ML — предсказание проблем до их возникновения
+
+### REST API для автоматизации
+
+   python
+import requests
+
+dnac_host = "10.0.0.200"
+base_url = f"https://{dnac_host}/dna"
+
+# 1. Получить токен аутентификации
+auth_url = f"{base_url}/system/api/v1/auth/token"
+token_response = requests.post(
+    auth_url,
+    auth=("admin", "cisco123"),
+    verify=False,
+)
+token = token_response.json()["Token"]
+headers = {"X-Auth-Token": token, "Content-Type": "application/json"}
+
+# 2. Получить список устройств
+devices_url = f"{base_url}/intent/api/v1/network-device"
+response = requests.get(devices_url, headers=headers, verify=False)
+devices = response.json()["response"]
+
+print(f"=== Устройства в DNA Center: {len(devices)} ===\n")
+for dev in devices:
+    print(f"  {dev['hostname']}")
+    print(f"    Платформа: {dev.get('platformId', 'N/A')}")
+    print(f"    IP: {dev.get('managementIpAddress', 'N/A')}")
+    print(f"    IOS: {dev.get('softwareVersion', 'N/A')}")
+    print(f"    Статус: {dev.get('reachabilityStatus', 'N/A')}")
+    print()
+
+# 3. Получить здоровье сети
+health_url = f"{base_url}/intent/api/v1/network-health"
+health = requests.get(health_url, headers=headers, verify=False)
+print(f"Network Health Score: {health.json()}")
+
+
+
+
+[← Вернуться к README](README.md) | [Далее: Автоматизация →](05-automation.md)

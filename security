@@ -1,0 +1,364 @@
+# Безопасность (Security) — Подробное руководство
+
+## Зачем нужна сетевая безопасность
+
+Сеть без защиты — как дом с открытыми дверями. Безопасность в Cisco строится на нескольких уровнях: контроль доступа на портах (ACL), межсетевые экраны (ASA/Firepower), 
+аутентификация пользователей и устройств (ISE), шифрование (VPN). Принцип простой — defense in depth, защита в глубину: каждый уровень добавляет свой слой защиты.
+
+
+## ACL (Access Control Lists)
+
+### Простыми словами
+
+ACL — это список правил на маршрутизаторе или коммутаторе: «этот трафик пропустить, этот — заблокировать». 
+Работает как охранник на входе — проверяет каждый пакет по списку и решает, что с ним делать. 
+ACL проверяется сверху вниз: первое совпавшее правило срабатывает, остальные игнорируются. В конце каждого ACL есть неявное «deny all» — всё, что не разрешено, запрещено.
+
+### Типы ACL
+
+| Тип      | Номера | Фильтрация по               | Когда использовать |
+| Standard | 1-99   | Только IP источника         | Простая фильтрация, ставить ближе к назначению |
+| Extended | 100-199| IP src/dst, порты, протокол | Точная фильтрация, ставить ближе к источнику |
+| Named    | имя    | Зависит от типа             | Удобнее читать и редактировать |
+
+### Основные команды CLI
+
+
+! Standard ACL 
+
+! Разрешить сеть бухгалтерии, запретить всё остальное
+access-list 10 permit 192.168.10.0 0.0.0.255
+access-list 10 deny any log
+
+! Применить на интерфейсе (outbound)
+interface GigabitEthernet0/1
+ ip access-group 10 out
+
+! Extended ACL 
+
+! Разрешить HTTP/HTTPS из сети 10.0 в интернет
+access-list 100 permit tcp 192.168.10.0 0.0.0.255 any eq 80
+access-list 100 permit tcp 192.168.10.0 0.0.0.255 any eq 443
+! Разрешить DNS
+access-list 100 permit udp 192.168.10.0 0.0.0.255 host 8.8.8.8 eq 53
+! Разрешить ICMP (ping)
+access-list 100 permit icmp 192.168.10.0 0.0.0.255 any
+! Запретить всё остальное
+access-list 100 deny ip any any log
+
+interface GigabitEthernet0/0
+ ip access-group 100 in
+
+! Named ACL (рекомендуется) 
+
+ip access-list extended INTERNET_ACCESS
+ remark --- Allow web traffic ---
+ permit tcp 192.168.10.0 0.0.0.255 any eq 80
+ permit tcp 192.168.10.0 0.0.0.255 any eq 443
+ remark --- Allow DNS ---
+ permit udp 192.168.10.0 0.0.0.255 any eq 53
+ remark --- Allow ICMP ---
+ permit icmp 192.168.10.0 0.0.0.255 any
+ remark --- Deny and log everything else ---
+ deny ip any any log
+
+! Удалить конкретную строку из Named ACL
+ip access-list extended INTERNET_ACCESS
+ no permit icmp 192.168.10.0 0.0.0.255 any
+
+! Вставить строку с номером последовательности
+ip access-list extended INTERNET_ACCESS
+ 15 permit icmp 192.168.10.0 0.0.0.255 any echo
+ 16 permit icmp 192.168.10.0 0.0.0.255 any echo-reply
+
+! ACL для VTY (защита SSH/Telnet доступа) 
+
+access-list 5 permit 10.0.0.0 0.0.0.255
+access-list 5 deny any log
+
+line vty 0 4
+ access-class 5 in
+ transport input ssh
+
+! Диагностика 
+
+show access-lists                        ! Все ACL с счётчиками
+show access-lists INTERNET_ACCESS        ! Конкретный ACL
+show ip interface GigabitEthernet0/0     ! Какие ACL применены
+clear access-list counters               ! Сбросить счётчики
+
+
+### Python-скрипт: аудит ACL на всех устройствах
+
+   python
+from netmiko import ConnectHandler
+
+devices = [
+    {"device_type": "cisco_ios", "host": "10.0.0.1",
+     "username": "admin", "password": "cisco123"},
+    {"device_type": "cisco_ios", "host": "10.0.0.2",
+     "username": "admin", "password": "cisco123"},
+]
+
+print("=== ACL Audit Report ===\n")
+
+for device in devices:
+    try:
+        conn = ConnectHandler(**device)
+        hostname = conn.find_prompt().replace("#", "")
+
+        # Получить все ACL
+        acls = conn.send_command("show access-lists")
+
+        # Получить интерфейсы с ACL
+        interfaces = conn.send_command("show ip interface brief")
+
+        print(f" {hostname} ({device['host']})")
+        print(f"{'─' * 40}")
+
+        if "deny" in acls and "0 matches" not in acls:
+            # Есть ACL с активными deny
+            for line in acls.split("\n"):
+                if "deny" in line and "matches" in line:
+                    matches = line.strip()
+                    if "0 matches" not in matches:
+                        print(f"  Активные блокировки: {matches}")
+
+        if not acls.strip():
+            print(f"  ACL не настроены!")
+        else:
+            # Подсчитать количество ACL
+            acl_count = acls.count("access list")
+            print(f"  Найдено ACL: {acl_count}")
+
+        print()
+        conn.disconnect()
+
+    except Exception as e:
+        print(f"  Ошибка: {device['host']} — {e}\n")
+
+
+
+
+## Cisco ASA (Adaptive Security Appliance)
+
+### Простыми словами
+
+ASA — это специализированный межсетевой экран от Cisco. В отличие от обычного маршрутизатора с ACL, ASA изначально создан для безопасности: 
+он отслеживает состояние соединений (stateful inspection), поддерживает VPN, NAT и глубокую инспекцию трафика. Каждый интерфейс ASA имеет «уровень безопасности» 
+от 0 (outside, наименее доверенный) до 100 (inside, наиболее доверенный). По умолчанию трафик разрешён от более высокого уровня к более низкому.
+
+### Где применяется
+
+- Периметр сети — между внутренней сетью и Интернетом
+- DMZ — размещение публичных серверов
+- VPN-концентратор для удалённых сотрудников
+- Сегментация между отделами
+
+### На каком оборудовании
+
+- Cisco ASA 5506-X, 5508-X, 5516-X (SMB)
+- Cisco ASA 5525-X, 5545-X, 5555-X (Enterprise)
+- Cisco Firepower 1000/2100/4100/9300 (нового поколения)
+- ASAv (виртуальная ASA)
+
+### Основные команды CLI
+
+
+! Базовая настройка интерфейсов 
+
+interface GigabitEthernet0/0
+ nameif outside
+ security-level 0
+ ip address 203.0.113.1 255.255.255.0
+ no shutdown
+
+interface GigabitEthernet0/1
+ nameif inside
+ security-level 100
+ ip address 192.168.1.1 255.255.255.0
+ no shutdown
+
+interface GigabitEthernet0/2
+ nameif dmz
+ security-level 50
+ ip address 172.16.1.1 255.255.255.0
+ no shutdown
+
+! NAT (PAT — выход в интернет) 
+
+! Все внутренние хосты выходят через один внешний IP
+object network INSIDE_NET
+ subnet 192.168.1.0 255.255.255.0
+ nat (inside,outside) dynamic interface
+
+! Статический NAT для web-сервера в DMZ
+object network WEB_SERVER
+ host 172.16.1.10
+ nat (dmz,outside) static 203.0.113.10
+
+! Access Control (ACL на ASA) 
+
+! Разрешить HTTP/HTTPS к web-серверу в DMZ
+access-list OUTSIDE_IN extended permit tcp any host 203.0.113.10 eq 80
+access-list OUTSIDE_IN extended permit tcp any host 203.0.113.10 eq 443
+access-list OUTSIDE_IN extended deny ip any any log
+
+access-group OUTSIDE_IN in interface outside
+
+! Site-to-Site VPN (IKEv2) 
+
+! Настройка IKEv2 policy
+crypto ikev2 policy 10
+ encryption aes-256
+ integrity sha256
+ group 14
+ prf sha256
+ lifetime seconds 86400
+
+! Tunnel group
+tunnel-group 198.51.100.1 type ipsec-l2l
+tunnel-group 198.51.100.1 ipsec-attributes
+ ikev2 remote-authentication pre-shared-key MyS3cretKey!
+ ikev2 local-authentication pre-shared-key MyS3cretKey!
+
+! Crypto map
+crypto map OUTSIDE_MAP 10 match address VPN_TRAFFIC
+crypto map OUTSIDE_MAP 10 set peer 198.51.100.1
+crypto map OUTSIDE_MAP 10 set ikev2 transform-set AES256_SHA256
+crypto map OUTSIDE_MAP interface outside
+
+! Диагностика 
+
+show interface ip brief                  ! Интерфейсы
+show conn count                          ! Количество соединений
+show conn                                ! Активные соединения
+show access-list                         ! ACL с счётчиками
+show nat                                 ! NAT-правила
+show crypto ikev2 sa                     ! IKEv2 туннели
+show vpn-sessiondb l2l                   ! Site-to-site VPN
+show failover                            ! Состояние HA
+packet-tracer input inside tcp 192.168.1.100 12345 8.8.8.8 443  ! Трассировка пакета
+
+
+
+
+## Cisco ISE (Identity Services Engine)
+
+### Простыми словами
+
+ISE — это система, которая контролирует, кто и с какого устройства подключается к сети. 
+Прежде чем получить доступ, пользователь или устройство должны «представиться» — через логин/пароль, сертификат или MAC-адрес.
+ISE проверяет эти данные и на основе политик решает: дать полный доступ, ограниченный (например, только в гостевой VLAN) или вообще заблокировать.
+
+### Где применяется
+
+- Корпоративные сети с контролем доступа 802.1X
+- BYOD (Bring Your Own Device) — регистрация личных устройств
+- Гостевой портал — Wi-Fi для посетителей с авторизацией
+- Профилирование IoT-устройств (камеры, принтеры, датчики)
+
+### Настройка 802.1X на коммутаторе (для работы с ISE)
+
+
+! Глобальные настройки для 802.1X 
+
+! Включить AAA
+aaa new-model
+aaa authentication dot1x default group radius
+aaa authorization network default group radius
+aaa accounting dot1x default start-stop group radius
+
+! RADIUS-серверы (ISE)
+radius server ISE_PRIMARY
+ address ipv4 10.0.0.50 auth-port 1812 acct-port 1813
+ key MyR4diusKey!
+
+radius server ISE_SECONDARY
+ address ipv4 10.0.0.51 auth-port 1812 acct-port 1813
+ key MyR4diusKey!
+
+! Включить 802.1X глобально
+dot1x system-auth-control
+
+! === Настройка порта для 802.1X ===
+
+interface GigabitEthernet0/1
+ description USER_PORT
+ switchport mode access
+ switchport access vlan 10
+
+ ! Включить аутентификацию
+ authentication port-control auto
+ authentication order dot1x mab
+ authentication priority dot1x mab
+ authentication host-mode multi-auth
+
+ ! 802.1X
+ dot1x pae authenticator
+ dot1x timeout tx-period 5
+
+ ! MAB (для устройств без 802.1X — принтеры, камеры)
+ mab
+
+ ! Guest VLAN (если аутентификация не пройдена)
+ authentication event fail action authorize vlan 100
+ authentication event no-response action authorize vlan 100
+
+ spanning-tree portfast
+
+! Диагностика 802.1X
+
+show authentication sessions                    ! Все аутентифицированные сессии
+show authentication sessions interface Gi0/1    ! Сессии на порту
+show dot1x all                                  ! Статус 802.1X
+show aaa servers                                ! Состояние RADIUS-серверов
+test aaa group radius admin cisco123 new-code   ! Тест аутентификации
+```
+
+### Python-скрипт: массовая настройка 802.1X на портах
+
+```python
+from netmiko import ConnectHandler
+
+switch = {
+    "device_type": "cisco_ios",
+    "host": "192.168.1.10",
+    "username": "admin",
+    "password": "cisco123",
+}
+
+# Порты для настройки 802.1X (пользовательские)
+user_ports = ["GigabitEthernet0/1", "GigabitEthernet0/2",
+              "GigabitEthernet0/3", "GigabitEthernet0/4",
+              "GigabitEthernet0/5", "GigabitEthernet0/6"]
+
+dot1x_config = [
+    "switchport mode access",
+    "authentication port-control auto",
+    "authentication order dot1x mab",
+    "authentication priority dot1x mab",
+    "dot1x pae authenticator",
+    "dot1x timeout tx-period 5",
+    "mab",
+    "authentication event fail action authorize vlan 100",
+    "spanning-tree portfast",
+]
+
+conn = ConnectHandler(**switch)
+hostname = conn.find_prompt().replace("#", "")
+print(f"[{hostname}] Настройка 802.1X портов...\n")
+
+for port in user_ports:
+    commands = [f"interface {port}"] + dot1x_config
+    conn.send_config_set(commands)
+    print(f"   {port} — 802.1X настроен")
+
+conn.save_config()
+print(f"\n Конфигурация сохранена на {hostname}")
+conn.disconnect()
+
+
+
+
+[← Вернуться к README](README.md) | [Далее: Беспроводные сети →](04-wireless.md)

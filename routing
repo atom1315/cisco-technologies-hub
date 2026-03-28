@@ -1,0 +1,393 @@
+# Маршрутизация (Routing) — Подробное руководство
+
+
+## Что такое маршрутизация
+
+Маршрутизация — это процесс выбора пути для передачи данных между разными сетями. Представьте себе навигатор в машине: он выбирает лучший маршрут из точки А в точку Б.
+Маршрутизатор делает то же самое, только для сетевых пакетов. Каждый маршрутизатор хранит таблицу маршрутов — своего рода «карту», по которой он решает, куда отправить
+пакет дальше.
+
+
+## OSPF (Open Shortest Path First)
+
+### Простыми словами
+
+OSPF — это протокол, который позволяет маршрутизаторам «общаться» друг с другом и строить полную карту сети. 
+Каждый маршрутизатор знает всю топологию и самостоятельно вычисляет кратчайший путь до любой сети. Работает по принципу алгоритма Дейкстры.
+
+### Где применяется
+
+- Корпоративные сети среднего и крупного масштаба (от 50 до тысяч маршрутизаторов)
+- Сети провайдеров (в связке с BGP)
+- Дата-центры (OSPF как underlay для VXLAN)
+
+### На каком оборудовании
+
+- Маршрутизаторы: Cisco ISR 1000/4000, ASR 1000, Catalyst 8000
+- L3-коммутаторы: Catalyst 9300/9500, Nexus 3000/9000
+- Виртуальные: CSR 1000v, Catalyst 8000v
+
+### Основные команды CLI
+
+```
+! === Базовая настройка OSPF ===
+
+! Включить OSPF с идентификатором процесса 1
+router ospf 1
+
+! Задать Router ID вручную (рекомендуется)
+router-id 1.1.1.1
+
+! Объявить сети в OSPF
+! network [сеть] [wildcard-маска] area [номер зоны]
+network 192.168.1.0 0.0.0.255 area 0
+network 10.0.0.0 0.0.0.3 area 0
+network 172.16.0.0 0.0.3.255 area 1
+
+! Или через интерфейс (более современный подход)
+interface GigabitEthernet0/0
+ ip ospf 1 area 0
+
+! === Настройка стоимости и приоритета ===
+
+! Изменить стоимость на интерфейсе (влияет на выбор маршрута)
+interface GigabitEthernet0/0
+ ip ospf cost 10
+
+! Изменить приоритет (влияет на выбор DR/BDR)
+ ip ospf priority 200
+
+! Установить эталонную полосу пропускания (в Мбит/с)
+router ospf 1
+ auto-cost reference-bandwidth 10000
+
+! === Аутентификация ===
+
+! MD5-аутентификация на интерфейсе
+interface GigabitEthernet0/0
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 MySecretKey
+
+! === Пассивные интерфейсы ===
+
+! Не отправлять OSPF Hello на интерфейсы к конечным устройствам
+router ospf 1
+ passive-interface default
+ no passive-interface GigabitEthernet0/0
+ no passive-interface GigabitEthernet0/1
+
+! === Суммаризация маршрутов ===
+
+! На ABR — суммаризация между зонами
+router ospf 1
+ area 1 range 172.16.0.0 255.255.252.0
+
+! На ASBR — суммаризация внешних маршрутов
+router ospf 1
+ summary-address 10.10.0.0 255.255.0.0
+
+! === Диагностика ===
+
+show ip ospf neighbor                  ! Список соседей
+show ip ospf interface brief           ! OSPF на интерфейсах
+show ip ospf database                  ! База данных LSDB
+show ip route ospf                     ! OSPF-маршруты в таблице
+show ip ospf interface GigabitEthernet0/0  ! Детали интерфейса
+debug ip ospf adj                      ! Отладка соседства (осторожно!)
+
+
+### Python-скрипт: сбор OSPF-соседей со всех устройств
+
+   python
+from netmiko import ConnectHandler
+
+devices = [
+    {
+        "device_type": "cisco_ios",
+        "host": "192.168.1.1",
+        "username": "admin",
+        "password": "cisco123",
+    },
+    {
+        "device_type": "cisco_ios",
+        "host": "192.168.1.2",
+        "username": "admin",
+        "password": "cisco123",
+    },
+]
+
+for device in devices:
+    try:
+        conn = ConnectHandler(**device)
+        hostname = conn.find_prompt().replace("#", "")
+        output = conn.send_command("show ip ospf neighbor", use_textfsm=True)
+
+        print(f"\n{'='*50}")
+        print(f"Устройство: {hostname} ({device['host']})")
+        print(f"{'='*50}")
+
+        if isinstance(output, list):
+            for neighbor in output:
+                print(f"  Сосед: {neighbor['neighbor_id']}")
+                print(f"  Состояние: {neighbor['state']}")
+                print(f"  Интерфейс: {neighbor['interface']}")
+                print(f"  IP: {neighbor['address']}")
+                print(f"  ---")
+        else:
+            print(output)
+
+        conn.disconnect()
+    except Exception as e:
+        print(f"Ошибка подключения к {device['host']}: {e}")
+
+
+
+
+## EIGRP (Enhanced Interior Gateway Routing Protocol)
+
+### Простыми словами
+
+EIGRP — проприетарный протокол Cisco (хотя в последних версиях открыт частично). Работает по принципу «расскажи соседям только об изменениях». 
+Не строит полную карту сети, как OSPF, а хранит таблицу соседей и лучших маршрутов.
+Очень быстро сходится — часто за секунды — благодаря тому, что заранее считает запасные пути.
+
+### Где применяется
+
+- Сети малого и среднего размера (до нескольких сотен маршрутизаторов)
+- Филиальные сети (hub-and-spoke)
+- Миграция со старых сетей на IGRP
+
+### На каком оборудовании
+
+- Маршрутизаторы: Cisco ISR 1100/4000, ASR серия
+- L3-коммутаторы: Catalyst 9200/9300/9500
+
+### Основные команды CLI
+
+
+! === Базовая настройка EIGRP (classic mode) ===
+
+router eigrp 100
+ network 192.168.1.0
+ network 10.0.0.0
+ no auto-summary
+
+! === Named mode (рекомендуется с IOS 15+) ===
+
+router eigrp MY_NETWORK
+ address-family ipv4 unicast autonomous-system 100
+  network 192.168.1.0 0.0.0.255
+  network 10.0.0.0 0.0.0.255
+  af-interface default
+   passive-interface
+  exit-af-interface
+  af-interface GigabitEthernet0/0
+   no passive-interface
+  exit-af-interface
+  topology base
+   no auto-summary
+  exit-af-topology
+ exit-address-family
+
+! === Настройка метрики ===
+
+! EIGRP использует составную метрику: bandwidth, delay, reliability, load
+! Изменить delay на интерфейсе (в десятках микросекунд)
+interface GigabitEthernet0/0
+ delay 100
+
+! Изменить bandwidth (логическое значение, не влияет на скорость)
+ bandwidth 1000000
+
+! === Аутентификация (named mode) ===
+
+router eigrp MY_NETWORK
+ address-family ipv4 unicast autonomous-system 100
+  af-interface GigabitEthernet0/0
+   authentication mode hmac-sha-256 MyEIGRPkey
+  exit-af-interface
+
+! === Stub-маршрутизатор (для филиалов) ===
+
+router eigrp 100
+ eigrp stub connected summary
+
+! === Диагностика ===
+
+show ip eigrp neighbors            ! Список соседей
+show ip eigrp topology              ! Таблица топологии
+show ip route eigrp                 ! EIGRP-маршруты
+show ip eigrp interfaces            ! EIGRP на интерфейсах
+show ip eigrp traffic               ! Статистика пакетов
+
+
+
+
+## BGP (Border Gateway Protocol)
+
+### Простыми словами
+
+BGP — «протокол Интернета». Если OSPF и EIGRP работают внутри одной организации, то BGP связывает между собой целые организации и провайдеров. 
+Каждая организация — это автономная система (AS) со своим номером. BGP не ищет «кратчайший путь» — он выбирает маршрут на основе политик: 
+через какого провайдера идти, какой трафик предпочесть, какие маршруты принимать или отклонять.
+
+### Где применяется
+
+- Подключение к Интернету через провайдера (eBGP)
+- Связь между дата-центрами (iBGP)
+- Внутри крупных дата-центров как underlay/overlay (BGP EVPN)
+- Cisco SD-WAN (OMP базируется на принципах BGP)
+
+### На каком оборудовании
+
+- Пограничные маршрутизаторы: ASR 1000/9000, Catalyst 8500
+- Коммутаторы ЦОД: Nexus 9000 (BGP EVPN/VXLAN)
+- Виртуальные: CSR 1000v, Catalyst 8000v
+
+### Основные команды CLI
+
+
+! === Базовая настройка eBGP ===
+
+router bgp 65001
+ bgp router-id 1.1.1.1
+ bgp log-neighbor-changes
+
+ ! Сосед в другой AS (eBGP)
+ neighbor 203.0.113.1 remote-as 65002
+ neighbor 203.0.113.1 description ISP_PRIMARY
+
+ ! Объявить свои сети
+ network 198.51.100.0 mask 255.255.255.0
+
+! === Настройка iBGP ===
+
+ ! Сосед в той же AS (iBGP)
+ neighbor 10.0.0.2 remote-as 65001
+ neighbor 10.0.0.2 update-source Loopback0
+ neighbor 10.0.0.2 next-hop-self
+
+! === Route-map для фильтрации и политик ===
+
+! Создать prefix-list
+ip prefix-list ALLOW_DEFAULT seq 10 permit 0.0.0.0/0
+ip prefix-list ALLOW_OUR_NETS seq 10 permit 198.51.100.0/24
+
+! Создать route-map
+route-map FROM_ISP permit 10
+ match ip address prefix-list ALLOW_DEFAULT
+route-map FROM_ISP deny 20
+
+! Применить к соседу
+router bgp 65001
+ neighbor 203.0.113.1 route-map FROM_ISP in
+
+! === BGP communities ===
+
+ neighbor 203.0.113.1 send-community both
+
+route-map SET_COMMUNITY permit 10
+ set community 65001:100
+
+! === Диагностика ===
+
+show ip bgp summary                ! Состояние сессий
+show ip bgp                        ! Таблица BGP
+show ip bgp neighbors 203.0.113.1  ! Детали соседа
+show ip bgp neighbors 203.0.113.1 advertised-routes  ! Что мы отправляем
+show ip bgp neighbors 203.0.113.1 received-routes    ! Что мы получаем
+clear ip bgp * soft                ! Мягкий сброс всех сессий
+
+
+### Python-скрипт: мониторинг BGP-сессий
+
+   python
+from netmiko import ConnectHandler
+import re
+
+device = {
+    "device_type": "cisco_ios",
+    "host": "10.0.0.1",
+    "username": "admin",
+    "password": "cisco123",
+}
+
+conn = ConnectHandler(**device)
+output = conn.send_command("show ip bgp summary", use_textfsm=True)
+
+print("=== BGP Session Monitor ===\n")
+
+if isinstance(output, list):
+    for peer in output:
+        status = peer.get("state_pfxrcd", "")
+        neighbor = peer["bgp_neigh"]
+        remote_as = peer["neigh_as"]
+        uptime = peer.get("up_down", "N/A")
+
+        # Если state_pfxrcd — число, сессия UP
+        if status.isdigit():
+            state = f"UP ({status} prefixes)"
+            icon = "+"
+        else:
+            state = f"DOWN ({status})"
+            icon = "-"
+
+        print(f"  {icon} Peer: {neighbor}  AS: {remote_as}  "
+              f"State: {state}  Uptime: {uptime}")
+else:
+    print(output)
+
+conn.disconnect()
+
+
+### Ansible Playbook: настройка BGP на нескольких устройствах
+
+   yaml
+
+# bgp_deploy.yml — раскатка BGP-конфигурации
+- name: Deploy BGP configuration
+  hosts: border_routers
+  gather_facts: no
+  connection: network_cli
+
+  vars:
+    bgp_as: 65001
+    bgp_networks:
+      - "198.51.100.0 mask 255.255.255.0"
+      - "203.0.113.0 mask 255.255.255.0"
+
+  tasks:
+    - name: Configure BGP base
+      cisco.ios.ios_config:
+        lines:
+          - bgp router-id {{ router_id }}
+          - bgp log-neighbor-changes
+        parents: router bgp {{ bgp_as }}
+
+    - name: Add BGP networks
+      cisco.ios.ios_config:
+        lines:
+          - network {{ item }}
+        parents: router bgp {{ bgp_as }}
+      loop: "{{ bgp_networks }}"
+
+    - name: Configure BGP neighbors
+      cisco.ios.ios_config:
+        lines:
+          - neighbor {{ item.ip }} remote-as {{ item.remote_as }}
+          - neighbor {{ item.ip }} description {{ item.description }}
+        parents: router bgp {{ bgp_as }}
+      loop: "{{ bgp_neighbors }}"
+
+    - name: Verify BGP sessions
+      cisco.ios.ios_command:
+        commands:
+          - show ip bgp summary
+      register: bgp_output
+
+    - name: Display BGP status
+      debug:
+        msg: "{{ bgp_output.stdout_lines }}"
+
+
+
